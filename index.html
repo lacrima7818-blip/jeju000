@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>한국어 음성 → 영어 번역</title>
+<style>
+  body{font-family:system-ui,-apple-system,"Malgun Gothic",sans-serif;max-width:880px;margin:36px auto;padding:0 16px;background:#f6f7f9;color:#17181c}
+  h1{font-size:20px;margin-bottom:4px}
+  .sub{font-size:13px;color:#6b7280;margin-bottom:20px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  button{padding:10px 18px;border:0;border-radius:8px;font-size:14px;cursor:pointer}
+  #start{background:#2563eb;color:#fff}
+  #stop{background:#dc2626;color:#fff}
+  #speak{background:#059669;color:#fff}
+  #pauseTts,#stopTts{background:#475569;color:#fff}
+  #clear,#copy{background:#e5e7eb}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  label{font-size:13px;display:flex;align-items:center;gap:5px}
+  select{padding:8px;border-radius:8px;border:1px solid #cbd5e1;font-size:13px;max-width:260px}
+  input[type=range]{width:110px;vertical-align:middle}
+  #status,#ttsStatus{font-size:13px;color:#555}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#9ca3af;margin-right:6px}
+  .dot.on{background:#ef4444;animation:p 1s infinite}
+  @keyframes p{50%{opacity:.25}}
+  .panes{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:700px){.panes{grid-template-columns:1fr}}
+  .pane h3{font-size:13px;margin:0 0 6px;color:#6b7280;font-weight:600}
+  .box{min-height:230px;border:1px solid #d7dbe0;border-radius:10px;background:#fff;padding:14px;line-height:1.75;white-space:pre-wrap;font-size:15px;overflow-y:auto;max-height:340px}
+  #en{background:#f0f7ff}
+  .interim{color:#9ca3af}
+  .line{display:block;padding:1px 4px;border-radius:4px}
+  .line.playing{background:#fde68a}
+  .warn{color:#b45309;font-size:12.5px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:9px 12px;margin-top:14px}
+  #err{color:#b91c1c;font-size:13px;margin-top:10px}
+  fieldset{border:1px solid #e2e5ea;border-radius:10px;padding:10px 14px;margin:0 0 14px;background:#fff}
+  legend{font-size:12px;color:#6b7280;padding:0 6px}
+</style>
+</head>
+<body>
+
+<h1>한국어 음성 → 영어 번역</h1>
+<div class="sub">Web Speech API(브라우저 내장) · 외부 API 키 없음</div>
+
+<div class="row">
+  <button id="start">🎙 시작</button>
+  <button id="stop" disabled>■ 정지</button>
+  <button id="clear">지우기</button>
+  <button id="copy">영문 복사</button>
+</div>
+
+<fieldset>
+  <legend>영어 음성 출력 (TTS)</legend>
+  <div class="row">
+    <button id="speak">🔊 영어 읽기</button>
+    <button id="pauseTts" disabled>⏸ 일시정지</button>
+    <button id="stopTts" disabled>⏹ 정지</button>
+    <select id="voiceSel"><option>음성 로딩 중...</option></select>
+    <label>속도 <input type="range" id="rate" min="0.5" max="1.6" step="0.1" value="1"><span id="rateVal">1.0</span></label>
+    <label><input type="checkbox" id="autoSpeak"> 번역 즉시 자동 읽기</label>
+  </div>
+  <div class="row"><span id="ttsStatus">대기 중</span></div>
+</fieldset>
+
+<div class="row">
+  <label><input type="checkbox" id="useAI"> 신경망 번역 사용 (최초 1회 모델 다운로드 ~300MB)</label>
+</div>
+
+<div class="row"><span id="status"><span class="dot" id="dot"></span>대기 중</span></div>
+
+<div class="panes">
+  <div class="pane"><h3>🇰🇷 인식된 한국어</h3><div class="box" id="ko"></div></div>
+  <div class="pane"><h3>🇺🇸 영어 번역</h3><div class="box" id="en"></div></div>
+</div>
+
+<div class="warn">
+  체크 해제 상태에서는 <b>내장 사전 기반 간이 번역</b>이 동작합니다. 등록된 단어·패턴만 변환됩니다.
+</div>
+<div id="err"></div>
+
+<script type="module">
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const koBox=document.getElementById('ko'), enBox=document.getElementById('en');
+const err=document.getElementById('err'), statusEl=document.getElementById('status');
+const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
+const useAI=document.getElementById('useAI');
+
+let recog=null, manualStop=false, koFinal='', enLines=[];
+
+if(!SR){ err.textContent='이 브라우저는 Web Speech API를 지원하지 않습니다. Chrome 또는 Edge를 사용하세요.'; startBtn.disabled=true; }
+
+const setStatus=(t,on)=>statusEl.innerHTML=`<span class="dot${on?' on':''}"></span>${t}`;
+
+function render(interimKo){
+  koBox.textContent=koFinal;
+  if(interimKo){ const s=document.createElement('span'); s.className='interim'; s.textContent=interimKo; koBox.appendChild(s); }
+  enBox.innerHTML='';
+  enLines.forEach((t,i)=>{
+    const sp=document.createElement('span'); sp.className='line'; sp.dataset.i=i; sp.textContent=t+'\n';
+    enBox.appendChild(sp);
+  });
+  koBox.scrollTop=koBox.scrollHeight; enBox.scrollTop=enBox.scrollHeight;
+}
+
+/* ==========================================================
+   ★ TTS — 수정된 부분
+   ========================================================== */
+const synth = window.speechSynthesis;
+const voiceSel=document.getElementById('voiceSel');
+const speakBtn=document.getElementById('speak');
+const pauseBtn=document.getElementById('pauseTts');
+const stopTtsBtn=document.getElementById('stopTts');
+const ttsStatus=document.getElementById('ttsStatus');
+const rate=document.getElementById('rate'), rateVal=document.getElementById('rateVal');
+const autoSpeak=document.getElementById('autoSpeak');
+
+let voices=[], ttsQueue=[], ttsIdx=0, ttsActive=false, keepAlive=null;
+
+if(!synth){ ttsStatus.textContent='이 브라우저는 음성 합성을 지원하지 않습니다.'; speakBtn.disabled=true; }
+
+// [수정 1] voices 비동기 로딩 — onvoiceschanged + 폴링 이중 대비
+function populateVoices(){
+  voices = synth.getVoices().filter(v=>/^en(-|_)/i.test(v.lang));
+  if(!voices.length) return false;
+  voiceSel.innerHTML='';
+  voices.forEach((v,i)=>{
+    const o=document.createElement('option');
+    o.value=i; o.textContent=`${v.name} (${v.lang})${v.localService?' · 로컬':''}`;
+    voiceSel.appendChild(o);
+  });
+  // en-US 로컬 음성 우선 선택
+  const best = voices.findIndex(v=>v.lang.replace('_','-')==='en-US' && v.localService);
+  voiceSel.value = best>=0 ? best : 0;
+  ttsStatus.textContent=`영어 음성 ${voices.length}개 사용 가능`;
+  return true;
+}
+if(synth){
+  synth.onvoiceschanged = populateVoices;
+  let tries=0;
+  const poll=setInterval(()=>{                     // Safari/일부 Chrome은 이벤트가 안 옴
+    if(populateVoices() || ++tries>25) clearInterval(poll);
+  },200);
+  setTimeout(()=>{ if(!voices.length) ttsStatus.textContent='영어 음성을 찾지 못했습니다. OS 설정에서 영어 음성 팩을 설치하세요.'; },5500);
+}
+
+rate.oninput=()=>rateVal.textContent=(+rate.value).toFixed(1);
+
+// [수정 2] 긴 텍스트를 문장 단위로 쪼개 큐로 재생 (Chrome 길이 제한 회피)
+function chunk(text){
+  const out=[];
+  text.split(/\n+/).forEach(line=>{
+    line=line.trim(); if(!line) return;
+    if(line.length<=180){ out.push(line); return; }
+    let buf='';
+    line.split(/(?<=[.!?])\s+/).forEach(s=>{
+      if((buf+' '+s).length>180){ if(buf) out.push(buf.trim()); buf=s; }
+      else buf+=' '+s;
+    });
+    if(buf.trim()) out.push(buf.trim());
+  });
+  return out;
+}
+
+function highlight(i){
+  enBox.querySelectorAll('.line').forEach(el=>el.classList.remove('playing'));
+  const el=enBox.querySelector(`.line[data-i="${i}"]`);
+  if(el){ el.classList.add('playing'); el.scrollIntoView({block:'nearest'}); }
+}
+
+// [수정 3] Chrome 15초 타임아웃 버그 → 주기적 pause/resume 으로 유지
+function startKeepAlive(){
+  clearInterval(keepAlive);
+  keepAlive=setInterval(()=>{
+    if(synth.speaking && !synth.paused){ synth.pause(); synth.resume(); }
+  },9000);
+}
+function stopKeepAlive(){ clearInterval(keepAlive); keepAlive=null; }
+
+function speakNext(){
+  if(ttsIdx>=ttsQueue.length){ endTts('읽기 완료'); return; }
+  const {text, lineIdx} = ttsQueue[ttsIdx];
+  const u=new SpeechSynthesisUtterance(text);
+  const v=voices[+voiceSel.value];
+  if(v){ u.voice=v; u.lang=v.lang; } else { u.lang='en-US'; }   // [수정 4] voice 객체 직접 지정
+  u.rate=+rate.value; u.pitch=1; u.volume=1;
+
+  u.onstart=()=>{ highlight(lineIdx); ttsStatus.textContent=`읽는 중 ${ttsIdx+1}/${ttsQueue.length}`; };
+  u.onend  =()=>{ ttsIdx++; if(ttsActive) speakNext(); };
+  u.onerror=(e)=>{
+    if(e.error==='interrupted'||e.error==='canceled') return;
+    ttsStatus.textContent='TTS 오류: '+e.error;
+    ttsIdx++; if(ttsActive) speakNext();
+  };
+  synth.speak(u);
+}
+
+function endTts(msg){
+  ttsActive=false; stopKeepAlive();
+  enBox.querySelectorAll('.line').forEach(el=>el.classList.remove('playing'));
+  ttsStatus.textContent=msg;
+  speakBtn.disabled=false; pauseBtn.disabled=true; stopTtsBtn.disabled=true;
+  pauseBtn.textContent='⏸ 일시정지';
+}
+
+// [수정 5] cancel() 직후 speak() 레이스 → 약간의 지연 후 시작
+function speakText(text){
+  if(!synth || !text.trim()) return;
+  const lines=text.split(/\n+/).filter(s=>s.trim());
+  ttsQueue=[];
+  lines.forEach((line,li)=>chunk(line).forEach(c=>ttsQueue.push({text:c, lineIdx:li})));
+  if(!ttsQueue.length) return;
+
+  synth.cancel();
+  ttsActive=true; ttsIdx=0;
+  speakBtn.disabled=true; pauseBtn.disabled=false; stopTtsBtn.disabled=false;
+  startKeepAlive();
+  setTimeout(speakNext, 120);
+}
+
+speakBtn.onclick=()=>{
+  if(!voices.length){ populateVoices(); }
+  speakText(enLines.join('\n'));
+};
+pauseBtn.onclick=()=>{
+  if(synth.paused){ synth.resume(); pauseBtn.textContent='⏸ 일시정지'; startKeepAlive(); }
+  else{ synth.pause(); pauseBtn.textContent='▶ 재개'; stopKeepAlive(); ttsStatus.textContent='일시정지'; }
+};
+stopTtsBtn.onclick=()=>{ ttsActive=false; synth.cancel(); endTts('정지됨'); };
+window.addEventListener('beforeunload',()=>synth && synth.cancel());
+
+/* ========================= 간이 번역 ========================= */
+const PHRASES=[
+  [/안녕하세요|안녕/,'Hello'],[/감사합니다|고맙습니다|고마워/,'Thank you'],
+  [/죄송합니다|미안해요|미안/,'Sorry'],[/반갑습니다|반가워/,'Nice to meet you'],
+  [/잘\s*부탁(드립니다|해요)?/,'I look forward to working with you'],
+  [/안녕히\s*계세요|안녕히\s*가세요|잘\s*가/,'Goodbye'],
+  [/^(네|예|응)$/,'Yes'],[/^(아니요|아니오|아니)$/,'No'],
+  [/도와\s*주세요/,'Please help me'],
+  [/화장실\s*(이)?\s*어디(예요|에요|있어요)?/,'Where is the restroom?'],
+  [/얼마(예요|에요|입니까)?/,'How much is it?'],
+  [/이름이\s*(뭐예요|무엇입니까|뭐야)/,'What is your name?'],
+  [/배\s*고파요?|배고파/,"I'm hungry"],[/피곤해요?|피곤해/,"I'm tired"],
+  [/사랑해요?|사랑해/,'I love you'],[/괜찮아요?|괜찮아/,"It's okay"],
+  [/오늘\s*날씨\s*(가)?\s*좋(네요|아요|다)/,'The weather is nice today'],
+  [/몇\s*시(예요|에요|입니까)?/,'What time is it?'],
+  [/다시\s*말(해|씀)\s*(해)?\s*주세요/,'Please say that again'],
+  [/천천히\s*말(해|씀)\s*(해)?\s*주세요/,'Please speak slowly'],
+];
+const WORDS={'나':'I','저':'I','너':'you','당신':'you','우리':'we','그':'he','그녀':'she',
+'물':'water','밥':'rice','음식':'food','커피':'coffee','차':'tea','빵':'bread','집':'home',
+'학교':'school','회사':'company','병원':'hospital','역':'station','오늘':'today','내일':'tomorrow',
+'어제':'yesterday','지금':'now','아침':'morning','점심':'lunch','저녁':'evening','밤':'night',
+'시간':'time','돈':'money','친구':'friend','가족':'family','사람':'person','책':'book',
+'컴퓨터':'computer','전화':'phone','날씨':'weather','비':'rain','눈':'snow','바람':'wind',
+'가다':'go','오다':'come','먹다':'eat','마시다':'drink','보다':'see','자다':'sleep',
+'좋다':'good','나쁘다':'bad','크다':'big','작다':'small','많다':'many','적다':'few',
+'빠르다':'fast','느리다':'slow','예쁘다':'pretty','재미있다':'fun',
+'하나':'one','둘':'two','셋':'three','넷':'four','다섯':'five'};
+
+const stem=t=>t.replace(/(습니다|ㅂ니다|했어요|해요|이에요|예요|에요|어요|아요|네요|지요|죠|다|요|은|는|이|가|을|를|에서|에게|에|와|과|도|만|로|으로)$/,'')||t;
+
+function simpleTranslate(ko){
+  const s=ko.trim(); if(!s) return '';
+  for(const [re,en] of PHRASES) if(re.test(s)) return en;
+  const out=s.split(/\s+/).map(tok=>{
+    const c=tok.replace(/[.,!?~]/g,'');
+    if(WORDS[c]) return WORDS[c];
+    const st=stem(c);
+    if(WORDS[st]) return WORDS[st];
+    if(WORDS[st+'다']) return WORDS[st+'다'];
+    return `[${c}]`;
+  }).join(' ');
+  return out.charAt(0).toUpperCase()+out.slice(1);
+}
+
+/* ====================== 신경망 번역 ====================== */
+let translator=null, loading=false;
+async function loadAI(){
+  if(translator||loading) return translator;
+  loading=true; setStatus('번역 모델 다운로드 중... (최초 1회)',false);
+  try{
+    const { pipeline }=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2');
+    translator=await pipeline('translation','Xenova/opus-mt-ko-en');
+    setStatus('모델 준비 완료',false);
+  }catch(e){ err.textContent='모델 로딩 실패: '+e.message+' — 간이 번역으로 대체합니다.'; useAI.checked=false; }
+  loading=false; return translator;
+}
+async function translate(ko){
+  if(useAI.checked){
+    const t=await loadAI();
+    if(t){ const r=await t(ko); return (r[0]?.translation_text||'').trim(); }
+  }
+  return simpleTranslate(ko);
+}
+useAI.addEventListener('change',()=>{ if(useAI.checked) loadAI(); });
+
+/* ====================== 인식 파이프라인 ====================== */
+function createRecognition(){
+  const r=new SR();
+  r.lang='ko-KR'; r.continuous=true; r.interimResults=true; r.maxAlternatives=1;
+  r.onstart=()=>setStatus('듣는 중...',true);
+  r.onresult=async(e)=>{
+    let interim=''; const finals=[];
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const t=e.results[i][0].transcript;
+      if(e.results[i].isFinal) finals.push(t.trim()); else interim+=t;
+    }
+    for(const f of finals){
+      if(!f) continue;
+      koFinal+=f+'\n'; render(interim);
+      const en=await translate(f);
+      enLines.push(en); render(interim);
+      if(autoSpeak.checked && en) speakText(en);   // 자동 읽기
+    }
+    render(interim);
+  };
+  r.onerror=(e)=>{
+    if(e.error==='no-speech') return;
+    if(e.error==='not-allowed'){ err.textContent='마이크 권한이 거부되었습니다.'; manualStop=true; }
+    else err.textContent='오류: '+e.error;
+  };
+  r.onend=()=>{
+    if(!manualStop){ try{ r.start(); }catch(_){} }
+    else{ setStatus('정지됨',false); startBtn.disabled=false; stopBtn.disabled=true; }
+  };
+  return r;
+}
+
+startBtn.onclick=()=>{ err.textContent=''; manualStop=false; recog=createRecognition(); recog.start(); startBtn.disabled=true; stopBtn.disabled=false; };
+stopBtn.onclick =()=>{ manualStop=true; if(recog) recog.stop(); };
+document.getElementById('clear').onclick=()=>{ koFinal=''; enLines=[]; render(''); };
+document.getElementById('copy').onclick=async()=>{
+  const txt=enLines.join('\n').trim(); if(!txt) return;
+  await navigator.clipboard.writeText(txt);
+  const b=document.getElementById('copy'); b.textContent='복사됨!'; setTimeout(()=>b.textContent='영문 복사',1200);
+};
+</script>
+</body>
+</html>
